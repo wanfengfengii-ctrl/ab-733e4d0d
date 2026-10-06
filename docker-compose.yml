@@ -1,0 +1,47 @@
+# Application image: serves the exact rational uncertainty API.
+# Host port is configurable via the API_HOST_PORT environment variable
+# (defaults to 8000): API_HOST_PORT=9090 docker compose up --build
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: uncertainty-api:latest
+    ports:
+      - "${API_HOST_PORT:-8000}:8000"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2).status == 200 else 1)"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+
+  # One-shot verification gate: waits until the API health check passes, then
+  # runs unit/HTTP tests, an application build check and HTTP smoke tests for
+  # valid and invalid covariance. Exits non-zero (failing the service) if any
+  # step fails, and exits on its own when everything passes.
+  verify:
+    image: uncertainty-api:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      # Points the smoke tests at the API service on the compose network.
+      SMOKE_BASE_URL: "http://api:8000"
+    entrypoint: ["/bin/bash", "-lc"]
+    command:
+      - |
+        set -euo pipefail
+        echo "==> Running unit and HTTP tests"
+        python -m pytest -v
+        echo "==> Building application (byte-compile and import check)"
+        python -m compileall -q app tests scripts
+        python -c "import app.main; print('application import OK')"
+        echo "==> HTTP smoke tests (valid and invalid covariance)"
+        python scripts/smoke.py "$$SMOKE_BASE_URL"
+        echo "==> All verification steps passed"
+    restart: "no"
